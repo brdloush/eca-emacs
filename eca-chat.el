@@ -888,6 +888,10 @@ once by `eca-chat-cleared'.")
   "Timer that flushes pending assistant stream text.")
 (defvar-local eca-chat--fontify-timer nil
   "Idle timer that defers `font-lock-ensure' during streaming.")
+(defvar-local eca-chat--scroll-timer nil
+  "Timer that runs the deferred scroll to the prompt, or nil.")
+(defvar-local eca-chat--scroll-wanted nil
+  "Non-nil when the deferred scroll must move to the prompt.")
 (defvar-local eca-chat--progress-text "")
 (defvar-local eca-chat--last-user-message-pos nil)
 (defvar-local eca-chat--last-response-copy-start nil
@@ -2164,15 +2168,60 @@ scroll unconditionally and keep point at the prompt past
 `eca-chat--with-point-preserved': used right after sending a
 prompt, when a long user message may already have pushed the
 prompt below the window end, making the guard always fail, and to
-resume following the chat after acting on a tool call approval."
+resume following the chat after acting on a tool call approval.
+
+Both `window-end' and `recenter' fontify the window, which is slow
+when a burst of content arrives (e.g. a /resume replay of a long
+chat).  So unless FORCE is t, the decision is taken once per burst
+and the scroll runs once after it, see `eca-chat--schedule-scroll'.
+FORCE `deferred' forces the scroll but defers it as well."
   (when-let* ((win (get-buffer-window (current-buffer))))
-    (when (and (eca-chat--prompt-area-start-point)
-               (or force (eca-chat--viewing-bottom-p win)))
-      (with-selected-window win
-        (goto-char (point-max))
-        (recenter -1))
-      (when force
-        (setq eca-chat--keep-point t)))))
+    (when (eca-chat--prompt-area-start-point)
+      (cond
+       ((eq force 'deferred)
+        (eca-chat--schedule-scroll t)
+        (setq eca-chat--keep-point t))
+       (force
+        (eca-chat--cancel-scroll)
+        (eca-chat--scroll-to-prompt win)
+        (setq eca-chat--keep-point t))
+       ((not (timerp eca-chat--scroll-timer))
+        (eca-chat--schedule-scroll (eca-chat--viewing-bottom-p win)))))))
+
+(defun eca-chat--scroll-to-prompt (win)
+  "Scroll WIN so the prompt area is at the window bottom."
+  (with-selected-window win
+    (goto-char (point-max))
+    (recenter -1)))
+
+(defun eca-chat--schedule-scroll (wanted)
+  "Schedule one scroll to the prompt after the current burst.
+WANTED non-nil means the scroll must happen; a later call in the
+same burst can turn it on, but not off."
+  (when wanted
+    (setq eca-chat--scroll-wanted t))
+  (unless (timerp eca-chat--scroll-timer)
+    (setq eca-chat--scroll-timer
+          (run-at-time 0 nil #'eca-chat--deferred-scroll
+                       (current-buffer)))))
+
+(defun eca-chat--cancel-scroll ()
+  "Cancel the scroll scheduled by `eca-chat--schedule-scroll'."
+  (when (timerp eca-chat--scroll-timer)
+    (cancel-timer eca-chat--scroll-timer))
+  (setq eca-chat--scroll-timer nil
+        eca-chat--scroll-wanted nil))
+
+(defun eca-chat--deferred-scroll (buffer)
+  "Run the scroll scheduled in BUFFER by `eca-chat--schedule-scroll'."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let ((wanted eca-chat--scroll-wanted))
+        (setq eca-chat--scroll-timer nil
+              eca-chat--scroll-wanted nil)
+        (when-let* ((wanted)
+                    (win (get-buffer-window buffer)))
+          (eca-chat--scroll-to-prompt win))))))
 
 (defun eca-chat--tool-call-accept-button-pos (id)
   "Return the position of the Accept button in tool call ID's label.
@@ -2211,6 +2260,8 @@ redisplay scroll right back to it.  Once the tool call resolves,
               (label-start (save-excursion
                              (goto-char (overlay-start ov-label))
                              (line-beginning-position))))
+    ;; A pending scroll would move the window away from the label.
+    (eca-chat--cancel-scroll)
     (with-selected-window win
       (goto-char (point-max))
       (recenter -1)
@@ -4791,7 +4842,7 @@ Must be called with `eca-chat--with-current-buffer' or equivalent."
                 ;; as the insertion pushes the prompt below the window
                 ;; end.  Skip when prepending older history pages.
                 (unless eca-chat--insertion-point-override
-                  (eca-chat--ensure-prompt-visible t)))))
+                  (eca-chat--ensure-prompt-visible 'deferred)))))
            ("system"
             (eca-chat--add-text-content
              (propertize text

@@ -3215,7 +3215,7 @@ QUESTION is a pending question plist, or (:tool-call-id ID)."
                '(:type "text" :text "a sent message" :contentId "issue-279-live")
                nil)
               (expect 'eca-chat--ensure-prompt-visible
-                      :to-have-been-called-with t)))
+                      :to-have-been-called-with 'deferred)))
         (kill-buffer buf))))
 
   (it "does not scroll when prepending an older history page"
