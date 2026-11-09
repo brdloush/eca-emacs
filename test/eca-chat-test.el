@@ -789,6 +789,61 @@ VISIBLE is the value `pos-visible-in-window-p' returns."
       (eca-chat--stream-flush)
       (expect 'recenter :to-have-been-called-with -1))))
 
+(describe "eca-chat scrolling within a batch of server messages"
+  ;; A /resume replay reads many messages at once.  Checking and
+  ;; scrolling the window for each one froze Emacs on long chats.
+  (it "checks the bottom and scrolls once, after the batch"
+    (eca-chat-test--with-streaming-prompt nil
+      (eca--with-batch
+        (dotimes (_ 3)
+          (eca-chat-test--stream-output "output\n"))
+        (expect 'recenter :not :to-have-been-called))
+      (expect 'eca-chat--viewing-bottom-p :to-have-been-called-times 1)
+      (expect 'recenter :to-have-been-called-times 1)
+      (expect 'recenter :to-have-been-called-with -1)))
+
+  (it "checks the bottom again in the next batch"
+    (eca-chat-test--with-streaming-prompt nil
+      (eca--with-batch (eca-chat-test--stream-output "output\n"))
+      (eca--with-batch (eca-chat-test--stream-output "output\n"))
+      (expect 'eca-chat--viewing-bottom-p :to-have-been-called-times 2)))
+
+  (it "keeps point when it scrolls to the prompt"
+    (eca-chat-test--with-streaming-prompt t
+      (let ((cursor (point)))
+        (eca--with-batch
+          (eca-chat--with-point-preserved
+            (eca-chat--ensure-prompt-visible)))
+        (expect 'recenter :to-have-been-called-with -1)
+        (expect (point) :to-equal cursor))))
+
+  (it "moves point to the prompt end after the batch of a sent message"
+    (eca-chat-test--with-streaming-prompt t
+      (let ((cursor (point)))
+        (eca--with-batch
+          (eca-chat--with-point-preserved
+            (eca-chat--ensure-prompt-visible 'deferred))
+          (expect 'recenter :not :to-have-been-called)
+          (expect (point) :to-equal cursor))
+        (expect 'recenter :to-have-been-called-with -1)
+        (expect (point) :to-equal (point-max)))))
+
+  (it "does not scroll while the user reads earlier content"
+    (eca-chat-test--with-streaming-prompt nil
+      (spy-on 'eca-chat--viewing-bottom-p :and-return-value nil)
+      (eca--with-batch
+        (eca-chat-test--stream-output "output\n")
+        (eca-chat--with-point-preserved
+          (eca-chat--ensure-prompt-visible)))
+      (expect 'recenter :not :to-have-been-called)))
+
+  (it "drops the scroll when the window gets anchored on an approval"
+    (eca-chat-test--with-streaming-prompt nil
+      (eca--with-batch
+        (eca-chat-test--stream-output "output\n")
+        (eca-chat--cancel-scroll))
+      (expect 'recenter :not :to-have-been-called))))
+
 (describe "eca-chat--ensure-tool-call-approval-visible"
   ;; Issue #308: a tool call awaiting approval whose expanded body is
   ;; taller than the window must keep its label and buttons in view
@@ -3711,7 +3766,7 @@ QUESTION is a pending question plist, or (:tool-call-id ID)."
                '(:type "text" :text "a sent message" :contentId "issue-279-live")
                nil)
               (expect 'eca-chat--ensure-prompt-visible
-                      :to-have-been-called-with t)))
+                      :to-have-been-called-with 'deferred)))
         (kill-buffer buf))))
 
   (it "does not scroll when prepending an older history page"

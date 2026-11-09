@@ -611,8 +611,11 @@ tool calls with full diffs) are reassembled correctly."
                      (eca-warn "Failed to parse the following chunk:\n'''\n%s\n'''\nwith message %s"
                                (concat leftovers raw-output)
                                err)))))))
-          (mapc handle-msg
-                (nreverse messages)))))))
+          ;; One batch per read: e.g. a replayed chat history then
+          ;; scrolls its window once per read, not once per message.
+          (eca--with-batch
+            (mapc handle-msg
+                  (nreverse messages))))))))
 
 (defun eca-process--make-process (&rest args)
   "Call `make-process' with ARGS, disabling ssh connection sharing.

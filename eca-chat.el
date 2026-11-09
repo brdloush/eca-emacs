@@ -971,6 +971,12 @@ Nil when no batch is being accepted.")
   "Timer that flushes pending assistant stream text.")
 (defvar-local eca-chat--fontify-timer nil
   "Idle timer that defers `font-lock-ensure' during streaming.")
+(defvar-local eca-chat--scroll-wanted nil
+  "Scroll to the prompt wanted in the current batch, see `eca--batch'.
+Nil, or a kind of `eca-chat--want-scroll'.")
+(defvar-local eca-chat--scroll-at-bottom 'unknown
+  "Whether the user views the bottom of the chat in the current batch.
+`unknown' until `eca-chat--batch-viewing-bottom-p' checks it.")
 (defvar-local eca-chat--progress-text "")
 (defvar-local eca-chat--last-user-message-pos nil)
 (defvar-local eca-chat--last-response-copy-start nil
@@ -2279,22 +2285,24 @@ along, and streaming must not move the cursor.  Helpers that move
 point deliberately set `eca-chat--keep-point' to keep the new
 position: a plain `save-excursion' would undo it whenever the chat
 window is the selected one.  When point is in the prompt and the
-bottom of the chat is shown, keep the end of the prompt visible."
+bottom of the chat is shown, keep the end of the prompt visible.
+Within a batch of server messages, the bottom is checked once and
+the prompt end kept visible once, after the batch, see
+`eca-chat--want-scroll'."
   (declare (indent 0) (debug t))
   (let ((saved (gensym "saved-point-"))
-        (win (gensym "chat-window-")))
+        (follow (gensym "follow-")))
     `(let* ((eca-chat--keep-point nil)
             (,saved (point-marker))
-            (,win (when-let* ((w (get-buffer-window (current-buffer))))
-                    (and (eca-chat--point-at-prompt-field-p)
-                         (eca-chat--viewing-bottom-p w)
-                         w))))
+            (,follow (when-let* ((w (get-buffer-window (current-buffer))))
+                       (and (eca-chat--point-at-prompt-field-p)
+                            (eca-chat--batch-viewing-bottom-p w)))))
        (unwind-protect (progn ,@body)
          (when (and (not eca-chat--keep-point)
                     (eq (marker-buffer ,saved) (current-buffer)))
            (goto-char ,saved)
-           (when ,win
-             (eca-chat--ensure-prompt-end-visible ,win)))
+           (when ,follow
+             (eca-chat--want-scroll 'end)))
          (set-marker ,saved nil)))))
 
 (defun eca-chat--ensure-prompt-end-visible (win)
@@ -2330,15 +2338,83 @@ scroll unconditionally and keep point at the prompt past
 `eca-chat--with-point-preserved': used right after sending a
 prompt, when a long user message may already have pushed the
 prompt below the window end, making the guard always fail, and to
-resume following the chat after acting on a tool call approval."
+resume following the chat after acting on a tool call approval.
+
+Both `window-end' and `recenter' fontify the window, which is slow
+when many messages arrive at once (e.g. a /resume replay of a long
+chat).  So within a batch of server messages, unless FORCE is t, the
+decision is taken once per batch and the scroll runs once after it,
+see `eca-chat--want-scroll'.  FORCE `deferred' forces the scroll but
+defers it as well."
   (when-let* ((win (get-buffer-window (current-buffer))))
-    (when (and (eca-chat--prompt-area-start-point)
-               (or force (eca-chat--viewing-bottom-p win)))
-      (with-selected-window win
-        (goto-char (point-max))
-        (recenter -1))
-      (when force
-        (setq eca-chat--keep-point t)))))
+    (when (eca-chat--prompt-area-start-point)
+      (cond
+       ((eq force 'deferred)
+        (setq eca-chat--keep-point t)
+        (eca-chat--want-scroll 'point))
+       (force
+        (eca-chat--cancel-scroll)
+        (eca-chat--scroll-to-prompt win)
+        (setq eca-chat--keep-point t))
+       ((eca-chat--batch-viewing-bottom-p win)
+        (eca-chat--want-scroll 'prompt))))))
+
+(defun eca-chat--scroll-to-prompt (win &optional keep-point)
+  "Scroll WIN so the prompt area is at the window bottom.
+Move point to the end of the prompt, unless KEEP-POINT is non-nil."
+  (with-selected-window win
+    (save-excursion
+      (goto-char (point-max))
+      (recenter -1))
+    (unless keep-point
+      (goto-char (point-max)))))
+
+(defun eca-chat--batch-viewing-bottom-p (win)
+  "Like `eca-chat--viewing-bottom-p' for WIN, checked once per batch.
+Within a batch of server messages, the first check holds until the
+batch is done or `eca-chat--cancel-scroll' runs, see `eca--batch'."
+  (if (not eca--batch)
+      (eca-chat--viewing-bottom-p win)
+    (when (eq eca-chat--scroll-at-bottom 'unknown)
+      (setq eca-chat--scroll-at-bottom (eca-chat--viewing-bottom-p win))
+      ;; Forget it once the batch is done.
+      (eca-chat--want-scroll nil))
+    eca-chat--scroll-at-bottom))
+
+(defun eca-chat--want-scroll (kind)
+  "Scroll the chat window to the prompt, in the way given by KIND.
+KIND is one of:
+- `end': keep the end of the prompt visible, keeping point.
+- `prompt': show the prompt area at the window bottom, keeping point.
+- `point': same, and move point to the end of the prompt.
+- nil: no scroll.
+Within a batch of server messages, the scroll runs once the batch is
+done, as the strongest KIND wanted, see `eca--with-batch'.  Outside
+one, it runs right away."
+  (let ((kinds '(nil end prompt point)))
+    (when (> (cl-position kind kinds)
+             (cl-position eca-chat--scroll-wanted kinds))
+      (setq eca-chat--scroll-wanted kind)))
+  (let ((buffer (current-buffer)))
+    (eca--when-batch-done
+     buffer (lambda () (eca-chat--run-wanted-scroll buffer)))))
+
+(defun eca-chat--cancel-scroll ()
+  "Drop the scroll wanted in the current batch, and its bottom check."
+  (setq eca-chat--scroll-wanted nil
+        eca-chat--scroll-at-bottom 'unknown))
+
+(defun eca-chat--run-wanted-scroll (buffer)
+  "Run the scroll wanted in BUFFER, see `eca-chat--want-scroll'."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let ((wanted eca-chat--scroll-wanted))
+        (eca-chat--cancel-scroll)
+        (when-let* ((wanted)
+                    (win (get-buffer-window buffer)))
+          (unless (eq wanted 'end)
+            (eca-chat--scroll-to-prompt win (eq wanted 'prompt)))
+          (eca-chat--ensure-prompt-end-visible win))))))
 
 (defun eca-chat--tool-call-accept-button-pos (id)
   "Return the position of the Accept button in tool call ID's label.
@@ -2377,6 +2453,8 @@ redisplay scroll right back to it.  Once the tool call resolves,
               (label-start (save-excursion
                              (goto-char (overlay-start ov-label))
                              (line-beginning-position))))
+    ;; A pending scroll would move the window away from the label.
+    (eca-chat--cancel-scroll)
     (with-selected-window win
       (goto-char (point-max))
       (recenter -1)
@@ -5323,7 +5401,7 @@ Must be called with `eca-chat--with-current-buffer' or equivalent."
                 ;; as the insertion pushes the prompt below the window
                 ;; end.  Skip when prepending older history pages.
                 (unless eca-chat--insertion-point-override
-                  (eca-chat--ensure-prompt-visible t)))))
+                  (eca-chat--ensure-prompt-visible 'deferred)))))
            ("system"
             (eca-chat--add-text-content
              (propertize text

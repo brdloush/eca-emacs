@@ -106,6 +106,43 @@ the change hooks, e.g. jit-lock's.  Timers run from the command loop
 see neither binding, so a deferred change gets made soon after."
   (or inhibit-redisplay inhibit-modification-hooks))
 
+(defvar eca--batch nil
+  "The batch of server messages being handled, or nil outside one.
+A list headed by the symbol `batch', followed by the (KEY . FN)
+entries deferred with `eca--when-batch-done', newest first.")
+
+(defmacro eca--with-batch (&rest body)
+  "Run BODY, which handles one batch of server messages.
+The process filter reads many messages at once, e.g. when a chat
+history gets replayed.  Work that would be repeated for each
+message, like scrolling a chat window, can then be done once, by
+deferring it with `eca--when-batch-done'.  The deferred functions
+run once BODY is done, even when it exits non-locally, before Emacs
+redisplays."
+  (declare (indent 0) (debug t))
+  (let ((batch (make-symbol "batch")))
+    `(let ((,batch (list 'batch)))
+       (unwind-protect
+           (let ((eca--batch ,batch))
+             ,@body)
+         (eca--run-batch ,batch)))))
+
+(defun eca--run-batch (batch)
+  "Call the functions deferred in BATCH, in the order deferred."
+  (dolist (entry (reverse (cdr batch)))
+    (with-demoted-errors "eca: error after a batch of messages: %S"
+      (funcall (cdr entry)))))
+
+(defun eca--when-batch-done (key fn)
+  "Call FN once the current batch of server messages is done.
+Outside a batch, call it right away.  Within one, defer FN only the
+first time for KEY: the deferred function must do the work of all
+the calls for KEY, e.g. read a state they updated."
+  (if eca--batch
+      (unless (assq key (cdr eca--batch))
+        (push (cons key fn) (cdr eca--batch)))
+    (funcall fn)))
+
 (defvar-local eca--session-id-cache nil)
 
 (defvar eca--sessions '())

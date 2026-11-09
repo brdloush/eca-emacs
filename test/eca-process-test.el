@@ -292,5 +292,31 @@
     (expect (car (spy-calls-args-for 'eca-info 0))
             :to-match "up to date")))
 
+(defun eca-process-test--frame (json)
+  "Return JSON framed as the server writes a message."
+  (format "Content-Length: %d\r\n\r\n%s" (string-bytes json) json))
+
+(describe "eca-process--make-filter"
+  (it "handles the messages of one read as one batch"
+    (let* ((handled nil)
+           (done nil)
+           (filter (eca-process--make-filter
+                    (lambda (msg)
+                      (push (plist-get msg :id) handled)
+                      (eca--when-batch-done
+                       'test (lambda () (push (reverse handled) done)))))))
+      (funcall filter nil (concat (eca-process-test--frame "{\"id\":1}")
+                                  (eca-process-test--frame "{\"id\":2}")))
+      (expect done :to-equal '((1 2)))))
+
+  (it "starts a new batch for each read"
+    (let* ((done 0)
+           (filter (eca-process--make-filter
+                    (lambda (_msg)
+                      (eca--when-batch-done 'test (lambda () (cl-incf done)))))))
+      (funcall filter nil (eca-process-test--frame "{\"id\":1}"))
+      (funcall filter nil (eca-process-test--frame "{\"id\":2}"))
+      (expect done :to-equal 2))))
+
 (provide 'eca-process-test)
 ;;; eca-process-test.el ends here

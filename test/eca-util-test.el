@@ -485,5 +485,51 @@
         (with-silent-modifications
           (expect (eca--text-change-unsafe-p) :to-be-truthy))))))
 
+(describe "eca--with-batch"
+  (it "calls a function right away outside a batch"
+    (let (calls)
+      (eca--when-batch-done 'a (lambda () (push 'a calls)))
+      (expect calls :to-equal '(a))))
+
+  (it "defers functions to the end of the batch, in order"
+    (let (calls)
+      (eca--with-batch
+        (eca--when-batch-done 'a (lambda () (push 'a calls)))
+        (eca--when-batch-done 'b (lambda () (push 'b calls)))
+        (expect calls :to-be nil))
+      (expect (nreverse calls) :to-equal '(a b))))
+
+  (it "defers a function once per key"
+    (let ((count 0))
+      (eca--with-batch
+        (dotimes (_ 3)
+          (eca--when-batch-done 'a (lambda () (cl-incf count)))))
+      (expect count :to-equal 1)))
+
+  (it "runs the deferred functions outside the batch"
+    (let (inside)
+      (eca--with-batch
+        (eca--when-batch-done 'a (lambda () (setq inside eca--batch))))
+      (expect inside :to-be nil)))
+
+  (it "runs the deferred functions when the batch exits with an error"
+    (let (calls)
+      (ignore-errors
+        (eca--with-batch
+          (eca--when-batch-done 'a (lambda () (push 'a calls)))
+          (error "Boom")))
+      (expect calls :to-equal '(a))))
+
+  (it "runs the other deferred functions when one fails"
+    ;; Buttercup turns `debug-on-error' on, which makes
+    ;; `with-demoted-errors' let the error through.
+    (let ((debug-on-error nil)
+          (inhibit-message t)
+          calls)
+      (eca--with-batch
+        (eca--when-batch-done 'a (lambda () (error "Boom")))
+        (eca--when-batch-done 'b (lambda () (push 'b calls))))
+      (expect calls :to-equal '(b)))))
+
 (provide 'eca-util-test)
 ;;; eca-util-test.el ends here
